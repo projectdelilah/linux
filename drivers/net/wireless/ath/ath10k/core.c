@@ -196,6 +196,46 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
 		},
 	},
+	{
+		.id = QCA9377_HW_1_1_DEV_VERSION,
+		.dev_id = QCA9377_1_0_DEVICE_ID,
+		.name = "qca9377 hw1.1 usb",
+		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
+		.uart_pin = 6,
+		.otp_exe_param = 0,
+		.channel_counters_freq_hz = 88000,
+		.max_probe_resp_desc_thres = 0,
+		.fw = {
+			.dir = QCA9377_HW_1_0_FW_DIR,
+			.board = QCA9377_HW_1_0_BOARD_DATA_FILE_USB,
+			.board_size = QCA9377_BOARD_DATA_SZ,
+			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
+		},
+		.max_num_peers = TARGET_QCA9377_HL_NUM_PEERS,
+		.is_high_latency = true,
+		.bus = ATH10K_BUS_USB,
+		.start_once = true,
+	},
+	{
+		.id = QCA9377_HW_1_1_DEV_VERSION,
+		.dev_id = QCA9377_1_0_DEVICE_ID,
+		.name = "qca9377 hw1.1 sdio",
+		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
+		.uart_pin = 19,
+		.otp_exe_param = 0,
+		.channel_counters_freq_hz = 88000,
+		.max_probe_resp_desc_thres = 0,
+		.fw = {
+			.dir = QCA9377_HW_1_0_FW_DIR,
+			.board = QCA9377_HW_1_0_BOARD_DATA_FILE_SDIO,
+			.board_size = QCA9377_BOARD_DATA_SZ,
+			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
+		},
+		.max_num_peers = TARGET_QCA9377_HL_NUM_PEERS,
+		.is_high_latency = true,
+		.bus = ATH10K_BUS_SDIO,
+		.start_once = true,
+	},
 };
 
 static const char *const ath10k_core_fw_feature_str[] = {
@@ -253,6 +293,442 @@ static void ath10k_send_suspend_complete(struct ath10k *ar)
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot suspend complete\n");
 
 	complete(&ar->target_suspend);
+}
+
+static u32 refclk_speed_to_hz[] = {
+	48000000, /* SOC_REFCLK_48_MHZ */
+	19200000, /* SOC_REFCLK_19_2_MHZ */
+	24000000, /* SOC_REFCLK_24_MHZ */
+	26000000, /* SOC_REFCLK_26_MHZ */
+	37400000, /* SOC_REFCLK_37_4_MHZ */
+	38400000, /* SOC_REFCLK_38_4_MHZ */
+	40000000, /* SOC_REFCLK_40_MHZ */
+	52000000, /* SOC_REFCLK_52_MHZ */
+};
+
+static int fw_populate_clk_settings(enum ath10k_refclk_speed refclk,
+				    struct ath10k_cmnos_clock *clock)
+{
+	if (!clock)
+		return -1;
+
+	switch (refclk) {
+	case SOC_REFCLK_48_MHZ:
+		clock->wlan_pll.div = 0xE;
+		clock->wlan_pll.rnfrac = 0x2AAA8;
+		clock->pll_settling_time = 2400;
+		break;
+	case SOC_REFCLK_19_2_MHZ:
+		clock->wlan_pll.div = 0x24;
+		clock->wlan_pll.rnfrac = 0x2AAA8;
+		clock->pll_settling_time = 960;
+		break;
+	case SOC_REFCLK_24_MHZ:
+		clock->wlan_pll.div = 0x1D;
+		clock->wlan_pll.rnfrac = 0x15551;
+		clock->pll_settling_time = 1200;
+		break;
+	case SOC_REFCLK_26_MHZ:
+		clock->wlan_pll.div = 0x1B;
+		clock->wlan_pll.rnfrac = 0x4EC4;
+		clock->pll_settling_time = 1300;
+		break;
+	case SOC_REFCLK_37_4_MHZ:
+		clock->wlan_pll.div = 0x12;
+		clock->wlan_pll.rnfrac = 0x34B49;
+		clock->pll_settling_time = 1870;
+		break;
+	case SOC_REFCLK_38_4_MHZ:
+		clock->wlan_pll.div = 0x12;
+		clock->wlan_pll.rnfrac = 0x15551;
+		clock->pll_settling_time = 1920;
+		break;
+	case SOC_REFCLK_40_MHZ:
+		clock->wlan_pll.div = 0x11;
+		clock->wlan_pll.rnfrac = 0x26665;
+		clock->pll_settling_time = 2000;
+		break;
+	case SOC_REFCLK_52_MHZ:
+		clock->wlan_pll.div = 0x1B;
+		clock->wlan_pll.rnfrac = 0x4EC4;
+		clock->pll_settling_time = 2600;
+		break;
+	case SOC_REFCLK_UNKNOWN:
+		clock->wlan_pll.refdiv = 0;
+		clock->wlan_pll.div = 0;
+		clock->wlan_pll.rnfrac = 0;
+		clock->wlan_pll.outdiv = 0;
+		clock->pll_settling_time = 1024;
+		clock->refclk_hz = 0;
+	default:
+		return -1;
+	}
+
+	clock->refclk_hz = refclk_speed_to_hz[refclk];
+	clock->wlan_pll.refdiv = 0;
+	clock->wlan_pll.outdiv = 1;
+
+	return 0;
+}
+
+static int ath10k_patch_pll_switch(struct ath10k *ar)
+{
+	int status;
+	u32 addr = 0, reg_val = 0, mem_val = 0, cmnos_core_clk_div_addr = 0,
+	    cmnos_cpu_pll_init_done_addr = 0, cmnos_cpu_speed_addr = 0;
+	struct ath10k_cmnos_clock clock;
+
+	switch (ar->target_version) {
+	case QCA6174_HW_1_1_VERSION:
+		cmnos_core_clk_div_addr = QCA6174_HW_1_1_CORE_CLK_DIV_ADDR;
+		cmnos_cpu_pll_init_done_addr = QCA6174_HW_1_1_CPU_PLL_INIT_DONE_ADDR;
+		cmnos_cpu_speed_addr = QCA6174_HW_1_1_CPU_SPEED_ADDR;
+		break;
+	case QCA6174_HW_1_3_VERSION:
+	case QCA6174_HW_2_1_VERSION:
+		cmnos_core_clk_div_addr = QCA6174_HW_1_3_CORE_CLK_DIV_ADDR;
+		cmnos_cpu_pll_init_done_addr = QCA6174_HW_1_3_CPU_PLL_INIT_DONE_ADDR;
+		cmnos_cpu_speed_addr = QCA6174_HW_1_3_CPU_SPEED_ADDR;
+		break;
+	case QCA6174_HW_3_2_VERSION:
+	case QCA9377_HW_1_0_DEV_VERSION:
+	case QCA9377_HW_1_1_DEV_VERSION:
+		cmnos_core_clk_div_addr = QCA9377_CORE_CLK_DIV_ADDR;
+		cmnos_cpu_pll_init_done_addr = QCA9377_CPU_PLL_INIT_DONE_ADDR;
+		cmnos_cpu_speed_addr = QCA9377_CPU_SPEED_ADDR;
+		break;
+	default:
+		ath10k_err(ar, "%s: Unsupported target version %x\n", __func__,
+			   ar->target_version);
+		return -1;
+	}
+
+	addr = (RTC_SOC_BASE_ADDRESS_SDIO | EFUSE_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read EFUSE Addr\n");
+		return status;
+	}
+
+	status = fw_populate_clk_settings(EFUSE_XTAL_SEL_GET(reg_val), &clock);
+	if (status) {
+		ath10k_err(ar,  "Failed to set clock settings\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT,"crystal_freq: %dHz\n", clock.refclk_hz);
+
+	/* ------Step 1----*/
+	reg_val = 0;
+	addr = (RTC_SOC_BASE_ADDRESS_SDIO | BB_PLL_CONFIG_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read PLL_CONFIG Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 1a: %8X\n", reg_val);
+
+	reg_val &= ~(BB_PLL_CONFIG_FRAC_MASK | BB_PLL_CONFIG_OUTDIV_MASK);
+	reg_val |= (BB_PLL_CONFIG_FRAC_SET(clock.wlan_pll.rnfrac) |
+			BB_PLL_CONFIG_OUTDIV_SET(clock.wlan_pll.outdiv));
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_CONFIG Addr\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back PLL_CONFIG Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 1b: %8X\n", reg_val);
+
+	/* ------Step 2----*/
+	reg_val = 0;
+	addr = (RTC_WMAC_BASE_ADDRESS_SDIO | WLAN_PLL_SETTLE_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read PLL_SETTLE Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 2a: %8X\n", reg_val);
+
+	reg_val &= ~WLAN_PLL_SETTLE_TIME_MASK;
+	reg_val |= WLAN_PLL_SETTLE_TIME_SET(clock.pll_settling_time);
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_SETTLE Addr\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back PLL_SETTLE Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 2b: %8X\n", reg_val);
+
+	/* ------Step 3----*/
+	reg_val = 0;
+	addr = (RTC_SOC_BASE_ADDRESS_SDIO | SOC_CORE_CLK_CTRL_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read CLK_CTRL Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 3a: %8X\n", reg_val);
+
+	reg_val &= ~SOC_CORE_CLK_CTRL_DIV_MASK;
+	reg_val |= SOC_CORE_CLK_CTRL_DIV_SET(1);
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write CLK_CTRL Addr\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back CLK_CTRL Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 3b: %8X\n", reg_val);
+
+	/* ------Step 4-----*/
+	mem_val = 1;
+	status = ath10k_bmi_write_memory(ar, cmnos_core_clk_div_addr, (u8 *)&mem_val, 4);
+	if (status) {
+		ath10k_err(ar,  "Failed to write CLK_DIV Addr\n");
+		return status;
+	}
+
+	/* ------Step 5-----*/
+	reg_val = 0;
+	addr = (RTC_WMAC_BASE_ADDRESS_SDIO | WLAN_PLL_CONTROL_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read PLL_CTRL Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 5a: %8X\n", reg_val);
+
+	reg_val &= ~(WLAN_PLL_CONTROL_REFDIV_MASK | WLAN_PLL_CONTROL_DIV_MASK |
+			WLAN_PLL_CONTROL_NOPWD_MASK);
+	reg_val |=  (WLAN_PLL_CONTROL_REFDIV_SET(clock.wlan_pll.refdiv) |
+			WLAN_PLL_CONTROL_DIV_SET(clock.wlan_pll.div) |
+			WLAN_PLL_CONTROL_NOPWD_SET(1));
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_CTRL Addr\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back PLL_CTRL Addr\n");
+		return status;
+	}
+	msleep(100);
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 5b: %8X\n", reg_val);
+
+	/* ------Step 6-------*/
+	do {
+		reg_val = 0;
+		status = ath10k_bmi_read_soc_reg(ar, (RTC_WMAC_BASE_ADDRESS_SDIO |
+				RTC_SYNC_STATUS_OFFSET), &reg_val);
+		if (status) {
+			ath10k_err(ar,  "Failed to read RTC_SYNC_STATUS Addr\n");
+			return status;
+		}
+	} while(RTC_SYNC_STATUS_PLL_CHANGING_GET(reg_val));
+
+	/* ------Step 7-------*/
+	reg_val = 0;
+	addr = (RTC_WMAC_BASE_ADDRESS_SDIO | WLAN_PLL_CONTROL_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read PLL_CTRL Addr for CTRL_BYPASS\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 7a: %8X\n", reg_val);
+
+	reg_val &= ~WLAN_PLL_CONTROL_BYPASS_MASK;
+	reg_val |= WLAN_PLL_CONTROL_BYPASS_SET(0);
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_CTRL Addr for CTRL_BYPASS\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back PLL_CTRL Addr for CTRL_BYPASS\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 7b: %8X\n", reg_val);
+
+	/* ------Step 8--------*/
+	do {
+		reg_val = 0;
+		status = ath10k_bmi_read_soc_reg(ar,
+			(RTC_WMAC_BASE_ADDRESS_SDIO | RTC_SYNC_STATUS_OFFSET),
+			&reg_val);
+		if (status) {
+			ath10k_err(ar,  "Failed to read SYNC_STATUS Addr\n");
+			return status;
+		}
+	} while(RTC_SYNC_STATUS_PLL_CHANGING_GET(reg_val));
+
+	/* ------Step 9--------*/
+	reg_val = 0;
+	addr = (RTC_SOC_BASE_ADDRESS_SDIO | SOC_CPU_CLOCK_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read CPU_CLK Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 9a: %8X\n", reg_val);
+
+	reg_val &= ~SOC_CPU_CLOCK_STANDARD_MASK;
+	reg_val |= SOC_CPU_CLOCK_STANDARD_SET(1);
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write CPU_CLK Addr\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back CPU_CLK Addr\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 9b: %8X\n", reg_val);
+
+	/* ------Step 10-------*/
+	reg_val = 0;
+	addr = (RTC_WMAC_BASE_ADDRESS_SDIO | WLAN_PLL_CONTROL_OFFSET);
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read PLL_CTRL Addr for NOPWD\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 10a: %8X\n", reg_val);
+
+	reg_val &= ~WLAN_PLL_CONTROL_NOPWD_MASK;
+	status = ath10k_bmi_write_soc_reg(ar, addr, reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_CTRL Addr for NOPWD\n");
+		return status;
+	}
+
+	reg_val = 0;
+	status = ath10k_bmi_read_soc_reg(ar, addr, &reg_val);
+	if (status) {
+		ath10k_err(ar,  "Failed to read back PLL_CTRL Addr for NOPWD\n");
+		return status;
+	}
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "Step 10b: %8X\n", reg_val);
+
+	/* ------Step 11-------*/
+	mem_val = 1;
+	status = ath10k_bmi_write_memory(ar, cmnos_cpu_pll_init_done_addr,
+			(u8 *)&mem_val, 4);
+	if (status) {
+		ath10k_err(ar,  "Failed to write PLL_INIT Addr\n");
+		return status;
+	}
+
+	mem_val = TARGET_CPU_FREQ;
+	status = ath10k_bmi_write_memory(ar, cmnos_cpu_speed_addr, (u8 *)&mem_val, 4);
+	if (status) {
+		ath10k_err(ar,  "Failed to write CPU_SPEED Addr\n");
+		return status;
+	}
+
+	return status;
+}
+
+static void ath10k_sdio_extra_initialization(struct ath10k *ar)
+{
+	u32 param = 0;
+
+	/* Turn on fwlog.
+	 */
+	ath10k_bmi_read32(ar, hi_option_flag, &param);
+	param &= ~(HI_OPTION_DISABLE_DBGLOG);
+	ath10k_bmi_write32(ar, hi_option_flag, param);
+
+	ath10k_bmi_write32(ar, hi_mbox_io_block_sz, 256);
+	ath10k_bmi_write32(ar, hi_mbox_isr_yield_limit, 99);
+	ath10k_bmi_read32(ar, hi_acs_flags, &param);
+
+	param |= (HI_ACS_FLAGS_SDIO_SWAP_MAILBOX_SET |
+		  HI_ACS_FLAGS_SDIO_REDUCE_TX_COMPL_SET |
+		  HI_ACS_FLAGS_ALT_DATA_CREDIT_SIZE);
+
+	ath10k_bmi_write32(ar, hi_acs_flags, param);
+}
+
+static int ath10k_init_configure_target_sdio(struct ath10k *ar)
+{
+	int ret;
+	u32 param;
+
+	/* tell target which HTC version it is used*/
+	ret = ath10k_bmi_write32(ar, hi_app_host_interest,
+				 HTC_PROTOCOL_VERSION);
+	if (ret) {
+		ath10k_err(ar, "settings HTC version failed\n");
+		return ret;
+	}
+
+	param = 0;
+
+	ret = ath10k_bmi_read32(ar, hi_option_flag, &param);
+	if (ret) {
+		ath10k_err(ar, "setting firmware mode (1/2) failed\n");
+		return ret;
+	}
+
+	param |= (1 << HI_OPTION_NUM_DEV_SHIFT);
+	param |= HI_OPTION_FW_MODE_AP << HI_OPTION_FW_MODE_SHIFT;
+	param |= 0 << HI_OPTION_FW_SUBMODE_SHIFT;
+
+	param |= (1 << HI_OPTION_MAC_ADDR_METHOD_SHIFT);
+	param |= (0 << HI_OPTION_FW_BRIDGE_SHIFT);
+
+	ret = ath10k_bmi_write32(ar, hi_option_flag, param);
+	if (ret) {
+		ath10k_err(ar, "bmi_write_memory for setting fwmode failed\n");
+		return ret;
+	}
+
+	param = 0;
+
+	ret = ath10k_bmi_write32(ar, hi_be, param);
+	if (ret) {
+		ath10k_err(ar, "bmi_write_memory for hi_be failed\n");
+		return ret;
+	}
+
+	ret = ath10k_bmi_write32(ar, hi_fw_swap, param);
+	if (ret) {
+		ath10k_err(ar, "bmi_write_memory for hi_bank0_addr_value failed\n");
+		return ret;
+	}
+
+	ret = ath10k_patch_pll_switch(ar);
+	if (ret) {
+		ath10k_err(ar, "patch pll switch failed\n");
+		return ret;
+	}
+
+	return 0;
 }
 
 static int ath10k_init_configure_target(struct ath10k *ar)
@@ -1173,47 +1649,43 @@ err:
 	return ret;
 }
 
+static void ath10k_core_get_fw_name(struct ath10k *ar, char *fw_name,
+				    int fw_api)
+{
+	if ((ar->hif.bus != ATH10K_BUS_PCI) && (ar->hif.bus != ATH10K_BUS_AHB))
+		snprintf(fw_name, ATH10K_FW_FILE_NAME_MAX_LEN, "%s-%s-%d.bin",
+			 ATH10K_FW_FILE_BASE, ath10k_bus_str(ar->hif.bus),
+			 fw_api);
+	else
+		snprintf(fw_name, ATH10K_FW_FILE_NAME_MAX_LEN, "%s-%d.bin",
+			 ATH10K_FW_FILE_BASE, fw_api);
+}
+
 static int ath10k_core_fetch_firmware_files(struct ath10k *ar)
 {
-	int ret;
+	int ret, i;
+	char fw_name[ATH10K_FW_FILE_NAME_MAX_LEN];
 
 	/* calibration file is optional, don't check for any errors */
 	ath10k_fetch_cal_file(ar);
 
-	ar->fw_api = 5;
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
+	for (i = 5; i >= 2; i--) {
+		ar->fw_api = i;
+		ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n",
+			   ar->fw_api);
 
-	ret = ath10k_core_fetch_firmware_api_n(ar, ATH10K_FW_API5_FILE);
-	if (ret == 0)
-		goto success;
-
-	ar->fw_api = 4;
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
-
-	ret = ath10k_core_fetch_firmware_api_n(ar, ATH10K_FW_API4_FILE);
-	if (ret == 0)
-		goto success;
-
-	ar->fw_api = 3;
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
-
-	ret = ath10k_core_fetch_firmware_api_n(ar, ATH10K_FW_API3_FILE);
-	if (ret == 0)
-		goto success;
-
-	ar->fw_api = 2;
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
-
-	ret = ath10k_core_fetch_firmware_api_n(ar, ATH10K_FW_API2_FILE);
-	if (ret == 0)
-		goto success;
-
-	ar->fw_api = 1;
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "trying fw api %d\n", ar->fw_api);
+		ath10k_core_get_fw_name(ar, fw_name, ar->fw_api);
+		ret = ath10k_core_fetch_firmware_api_n(ar, fw_name);
+		if (!ret)
+			goto success;
+	}
 
 	ret = ath10k_core_fetch_firmware_api_1(ar);
-	if (ret)
-		return ret;
+	if (ret == 0)
+		goto success;
+
+	/* We end up here if we couldn't fetch any firmware */
+	return ret;
 
 success:
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "using fw api %d\n", ar->fw_api);
@@ -1307,9 +1779,19 @@ static int ath10k_init_hw_params(struct ath10k *ar)
 	for (i = 0; i < ARRAY_SIZE(ath10k_hw_params_list); i++) {
 		hw_params = &ath10k_hw_params_list[i];
 
-		if (hw_params->id == ar->target_version &&
-		    hw_params->dev_id == ar->dev_id)
-			break;
+		if (ar->is_high_latency) {
+			/* High latency devices will use different fw depending
+			 * on if it is a USB or SDIO device.
+			 */
+			if (hw_params->bus == ar->hif.bus &&
+			    hw_params->id == ar->target_version &&
+			    hw_params->dev_id == ar->dev_id)
+				break;
+		} else {
+			if (hw_params->id == ar->target_version &&
+			    hw_params->dev_id == ar->dev_id)
+				break;
+		}
 	}
 
 	if (i == ARRAY_SIZE(ath10k_hw_params_list)) {
@@ -1383,6 +1865,8 @@ static void ath10k_core_restart(struct work_struct *work)
 
 static int ath10k_core_init_firmware_features(struct ath10k *ar)
 {
+	int max_num_peers;
+
 	if (test_bit(ATH10K_FW_FEATURE_WMI_10_2, ar->fw_features) &&
 	    !test_bit(ATH10K_FW_FEATURE_WMI_10X, ar->fw_features)) {
 		ath10k_err(ar, "feature bits corrupted: 10.2 feature requires 10.x feature to be set as well");
@@ -1417,8 +1901,13 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		return -EINVAL;
 	}
 
-	ar->htt.max_num_amsdu = ATH10K_HTT_MAX_NUM_AMSDU_DEFAULT;
-	ar->htt.max_num_ampdu = ATH10K_HTT_MAX_NUM_AMPDU_DEFAULT;
+	if (ar->is_high_latency) {
+		ar->htt.max_num_amsdu = ATH10K_HTT_MAX_NUM_AMSDU_HL;
+		ar->htt.max_num_ampdu = ATH10K_HTT_MAX_NUM_AMPDU_HL;
+	} else {
+		ar->htt.max_num_amsdu = ATH10K_HTT_MAX_NUM_AMSDU_DEFAULT;
+		ar->htt.max_num_ampdu = ATH10K_HTT_MAX_NUM_AMPDU_DEFAULT;
+	}
 
 	if (rawmode) {
 		if (!test_bit(ATH10K_FW_FEATURE_RAW_MODE_SUPPORT,
@@ -1461,7 +1950,7 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 
 	switch (ar->wmi.op_version) {
 	case ATH10K_FW_WMI_OP_VERSION_MAIN:
-		ar->max_num_peers = TARGET_NUM_PEERS;
+		max_num_peers = TARGET_NUM_PEERS;
 		ar->max_num_stations = TARGET_NUM_STATIONS;
 		ar->max_num_vdevs = TARGET_NUM_VDEVS;
 		ar->htt.max_num_pending_tx = TARGET_NUM_MSDU_DESC;
@@ -1472,7 +1961,7 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 	case ATH10K_FW_WMI_OP_VERSION_10_1:
 	case ATH10K_FW_WMI_OP_VERSION_10_2:
 	case ATH10K_FW_WMI_OP_VERSION_10_2_4:
-		ar->max_num_peers = TARGET_10X_NUM_PEERS;
+		max_num_peers = TARGET_10X_NUM_PEERS;
 		ar->max_num_stations = TARGET_10X_NUM_STATIONS;
 		ar->max_num_vdevs = TARGET_10X_NUM_VDEVS;
 		ar->htt.max_num_pending_tx = TARGET_10X_NUM_MSDU_DESC;
@@ -1480,7 +1969,7 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
 		break;
 	case ATH10K_FW_WMI_OP_VERSION_TLV:
-		ar->max_num_peers = TARGET_TLV_NUM_PEERS;
+		max_num_peers = TARGET_TLV_NUM_PEERS;
 		ar->max_num_stations = TARGET_TLV_NUM_STATIONS;
 		ar->max_num_vdevs = TARGET_TLV_NUM_VDEVS;
 		ar->max_num_tdls_vdevs = TARGET_TLV_NUM_TDLS_VDEVS;
@@ -1491,7 +1980,7 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
 		break;
 	case ATH10K_FW_WMI_OP_VERSION_10_4:
-		ar->max_num_peers = TARGET_10_4_NUM_PEERS;
+		max_num_peers = TARGET_10_4_NUM_PEERS;
 		ar->max_num_stations = TARGET_10_4_NUM_STATIONS;
 		ar->num_active_peers = TARGET_10_4_ACTIVE_PEERS;
 		ar->max_num_vdevs = TARGET_10_4_NUM_VDEVS;
@@ -1502,9 +1991,15 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		break;
 	case ATH10K_FW_WMI_OP_VERSION_UNSET:
 	case ATH10K_FW_WMI_OP_VERSION_MAX:
+	default:
 		WARN_ON(1);
 		return -EINVAL;
 	}
+
+	if (ar->hw_params.max_num_peers)
+		ar->max_num_peers = ar->hw_params.max_num_peers;
+	else
+		ar->max_num_peers = max_num_peers;
 
 	/* Backwards compatibility for firmwares without
 	 * ATH10K_FW_IE_HTT_OP_VERSION.
@@ -1537,13 +2032,21 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode)
 {
 	int status;
 
+	if (ar->is_started && ar->hw_params.start_once)
+		return 0;
+
 	lockdep_assert_held(&ar->conf_mutex);
 
 	clear_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 
 	ath10k_bmi_start(ar);
 
-	if (ath10k_init_configure_target(ar)) {
+	if (ar->hif.bus == ATH10K_BUS_SDIO)
+		status = ath10k_init_configure_target_sdio(ar);
+	else
+		status = ath10k_init_configure_target(ar);
+
+	if (status) {
 		status = -EINVAL;
 		goto err;
 	}
@@ -1576,6 +2079,9 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode)
 	if (status)
 		goto err;
 
+	if (ar->hif.bus == ATH10K_BUS_SDIO)
+		ath10k_sdio_extra_initialization(ar);
+
 	ar->htc.htc_ops.target_send_suspend_complete =
 		ath10k_send_suspend_complete;
 
@@ -1601,16 +2107,18 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode)
 		goto err_wmi_detach;
 	}
 
-	status = ath10k_htt_tx_alloc(&ar->htt);
-	if (status) {
-		ath10k_err(ar, "failed to alloc htt tx: %d\n", status);
-		goto err_wmi_detach;
-	}
+	if (!ar->is_high_latency) {
+		status = ath10k_htt_tx_alloc(&ar->htt);
+		if (status) {
+			ath10k_err(ar, "failed to alloc htt tx: %d\n", status);
+			goto err_wmi_detach;
+		}
 
-	status = ath10k_htt_rx_alloc(&ar->htt);
-	if (status) {
-		ath10k_err(ar, "failed to alloc htt rx: %d\n", status);
-		goto err_htt_tx_detach;
+		status = ath10k_htt_rx_alloc(&ar->htt);
+		if (status) {
+			ath10k_err(ar, "failed to alloc htt rx: %d\n", status);
+			goto err_htt_tx_detach;
+		}
 	}
 
 	status = ath10k_hif_start(ar);
@@ -1669,16 +2177,20 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode)
 		goto err_hif_stop;
 	}
 
-	/* If firmware indicates Full Rx Reorder support it must be used in a
-	 * slightly different manner. Let HTT code know.
-	 */
-	ar->htt.rx_ring.in_ord_rx = !!(test_bit(WMI_SERVICE_RX_FULL_REORDER,
-						ar->wmi.svc_map));
+	if (!ar->is_high_latency) {
+		/* If firmware indicates Full Rx Reorder support it must be
+		 * used in a slightly different manner. Let HTT code know.
+		 */
+		ar->htt.rx_ring.in_ord_rx =
+			!!(test_bit(WMI_SERVICE_RX_FULL_REORDER,
+				    ar->wmi.svc_map));
 
-	status = ath10k_htt_rx_ring_refill(ar);
-	if (status) {
-		ath10k_err(ar, "failed to refill htt rx ring: %d\n", status);
-		goto err_hif_stop;
+		status = ath10k_htt_rx_ring_refill(ar);
+		if (status) {
+			ath10k_err(ar, "failed to refill htt rx ring: %d\n",
+				   status);
+			goto err_hif_stop;
+		}
 	}
 
 	ar->free_vdev_map = (1LL << ar->max_num_vdevs) - 1;
@@ -1698,12 +2210,14 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode)
 	if (status)
 		goto err_hif_stop;
 
+	ar->is_started = true;
 	return 0;
 
 err_hif_stop:
 	ath10k_hif_stop(ar);
 err_htt_rx_detach:
-	ath10k_htt_rx_free(&ar->htt);
+	if (!ar->is_high_latency)
+		ath10k_htt_rx_free(&ar->htt);
 err_htt_tx_detach:
 	ath10k_htt_tx_free(&ar->htt);
 err_wmi_detach:
@@ -1748,8 +2262,11 @@ void ath10k_core_stop(struct ath10k *ar)
 
 	ath10k_hif_stop(ar);
 	ath10k_htt_tx_free(&ar->htt);
-	ath10k_htt_rx_free(&ar->htt);
+	if (!ar->is_high_latency)
+		ath10k_htt_rx_free(&ar->htt);
+
 	ath10k_wmi_detach(ar);
+	ar->is_started = false;
 }
 EXPORT_SYMBOL(ath10k_core_stop);
 
@@ -1769,7 +2286,10 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 	}
 
 	memset(&target_info, 0, sizeof(target_info));
-	ret = ath10k_bmi_get_target_info(ar, &target_info);
+	if (ar->hif.bus == ATH10K_BUS_SDIO)
+		ret = ath10k_bmi_get_target_info_sdio(ar, &target_info);
+	else
+		ret = ath10k_bmi_get_target_info(ar, &target_info);
 	if (ret) {
 		ath10k_err(ar, "could not get target info (%d)\n", ret);
 		goto err_power_down;
@@ -1825,12 +2345,18 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
 		goto err_unlock;
 	}
 
-	ath10k_print_driver_info(ar);
-	ath10k_core_stop(ar);
+	/* Leave target running if hw_params.start_once is set */
+	if (ar->hw_params.start_once) {
+		mutex_unlock(&ar->conf_mutex);
+	} else {
+		ath10k_print_driver_info(ar);
+		ath10k_core_stop(ar);
 
-	mutex_unlock(&ar->conf_mutex);
+		mutex_unlock(&ar->conf_mutex);
 
-	ath10k_hif_power_down(ar);
+		ath10k_hif_power_down(ar);
+	}
+
 	return 0;
 
 err_unlock:
@@ -1954,6 +2480,7 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 	ar->hw_rev = hw_rev;
 	ar->hif.ops = hif_ops;
 	ar->hif.bus = bus;
+	ar->is_high_latency = ath10k_is_high_latency(bus);
 
 	switch (hw_rev) {
 	case ATH10K_HW_QCA988X:

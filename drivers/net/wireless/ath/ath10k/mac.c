@@ -3324,15 +3324,21 @@ static void ath10k_mac_tx(struct ath10k *ar, struct sk_buff *skb)
 	case ATH10K_HW_TXRX_RAW:
 	case ATH10K_HW_TXRX_NATIVE_WIFI:
 	case ATH10K_HW_TXRX_ETHERNET:
-		ret = ath10k_htt_tx(htt, skb);
+		if (ar->is_high_latency)
+			ret = ath10k_htt_tx_hl(htt, skb);
+		else
+			ret = ath10k_htt_tx_ll(htt, skb);
 		break;
 	case ATH10K_HW_TXRX_MGMT:
 		if (test_bit(ATH10K_FW_FEATURE_HAS_WMI_MGMT_TX,
 			     ar->fw_features))
 			ret = ath10k_mac_tx_wmi_mgmt(ar, skb);
-		else if (ar->htt.target_version_major >= 3)
-			ret = ath10k_htt_tx(htt, skb);
-		else
+		else if (ar->htt.target_version_major >= 3) {
+			if (ar->is_high_latency)
+				ret = ath10k_htt_tx_hl(htt, skb);
+			else
+				ret = ath10k_htt_tx_ll(htt, skb);
+		} else
 			ret = ath10k_htt_mgmt_tx(htt, skb);
 		break;
 	}
@@ -4785,6 +4791,7 @@ static void ath10k_bss_info_changed(struct ieee80211_hw *hw,
 	if (changed & BSS_CHANGED_BEACON_ENABLED)
 		ath10k_control_beaconing(arvif, info);
 
+#if 0
 	if (changed & BSS_CHANGED_ERP_CTS_PROT) {
 		arvif->use_cts_prot = info->use_cts_prot;
 		ath10k_dbg(ar, ATH10K_DBG_MAC, "mac vdev %d cts_prot %d\n",
@@ -4802,6 +4809,7 @@ static void ath10k_bss_info_changed(struct ieee80211_hw *hw,
 			ath10k_warn(ar, "failed to set protection mode %d on vdev %i: %d\n",
 				    info->use_cts_prot, arvif->vdev_id, ret);
 	}
+#endif
 
 	if (changed & BSS_CHANGED_ERP_SLOT) {
 		if (info->use_short_slot)

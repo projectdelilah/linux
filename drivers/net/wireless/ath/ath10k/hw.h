@@ -20,6 +20,13 @@
 
 #include "targaddrs.h"
 
+enum ath10k_bus {
+	ATH10K_BUS_PCI,
+	ATH10K_BUS_AHB,
+	ATH10K_BUS_SDIO,
+	ATH10K_BUS_USB,
+};
+
 #define ATH10K_FW_DIR			"ath10k"
 
 #define QCA988X_2_0_DEVICE_ID   (0x003c)
@@ -104,7 +111,13 @@ enum qca9377_chip_id_rev {
 #define QCA9377_HW_1_0_FW_FILE         "firmware.bin"
 #define QCA9377_HW_1_0_OTP_FILE        "otp.bin"
 #define QCA9377_HW_1_0_BOARD_DATA_FILE "board.bin"
+#define QCA9377_HW_1_0_BOARD_DATA_FILE_USB "board-usb.bin"
+#define QCA9377_HW_1_0_BOARD_DATA_FILE_SDIO "board-sdio.bin"
 #define QCA9377_HW_1_0_PATCH_LOAD_ADDR	0x1234
+
+#define ATH10K_FW_FILE_NAME_MAX_LEN	100
+
+#define ATH10K_FW_FILE_BASE		"firmware"
 
 #define ATH10K_FW_API2_FILE		"firmware-2.bin"
 #define ATH10K_FW_API3_FILE		"firmware-3.bin"
@@ -307,6 +320,62 @@ enum ath10k_hw_rate_cck {
 	ATH10K_HW_RATE_CCK_SP_2M,
 };
 
+struct ath10k_hw_params {
+	u32 id;
+	u16 dev_id;
+	const char *name;
+	u32 patch_load_addr;
+	int uart_pin;
+	u32 otp_exe_param;
+
+	/* This is true if given HW chip has a quirky Cycle Counter
+	 * wraparound which resets to 0x7fffffff instead of 0. All
+	 * other CC related counters (e.g. Rx Clear Count) are divided
+	 * by 2 so they never wraparound themselves.
+	 */
+	bool has_shifted_cc_wraparound;
+
+	/* Some of chip expects fragment descriptor to be continuous
+	 * memory for any TX operation. Set continuous_frag_desc flag
+	 * for the hardware which have such requirement.
+	 */
+	bool continuous_frag_desc;
+
+	u32 channel_counters_freq_hz;
+
+	/* Mgmt tx descriptors threshold for limiting probe response
+	 * frames.
+	 */
+	u32 max_probe_resp_desc_thres;
+
+	struct ath10k_hw_params_fw {
+		const char *dir;
+		const char *fw;
+		const char *otp;
+		const char *board;
+		size_t board_size;
+		size_t board_ext_size;
+	} fw;
+
+	/* max_num_peers can be used to override the setting derived from
+	 * the WMI op version. If this value is non-zero, it will always
+	 * be used instead of the default value derived from the WMI op
+	 * version.
+	 */
+	int max_num_peers;
+
+	/* Specifies whether or not the device is a high latency device */
+	bool is_high_latency;
+
+	enum ath10k_bus bus;
+
+	/* Specifies whether or not the device should be started once.
+	 * If set, the device will be started once by the early fw probe
+	 * and it will not be terminated afterwards.
+	 */
+	bool start_once;
+};
+
 /* Target specific defines for MAIN firmware */
 #define TARGET_NUM_VDEVS			8
 #define TARGET_NUM_PEER_AST			2
@@ -385,6 +454,9 @@ enum ath10k_hw_rate_cck {
 #define TARGET_TLV_NUM_TIDS			((TARGET_TLV_NUM_PEERS) * 2)
 #define TARGET_TLV_NUM_MSDU_DESC		(1024 + 32)
 #define TARGET_TLV_NUM_WOW_PATTERNS		22
+
+/* Target specific defines for QCA9377 high latency firmware */
+#define TARGET_QCA9377_HL_NUM_PEERS		15
 
 /* Diagnostic Window */
 #define CE_DIAG_PIPE	7
@@ -662,6 +734,169 @@ enum ath10k_hw_rate_cck {
 #define WINDOW_READ_ADDR_ADDRESS		MISSING
 #define WINDOW_WRITE_ADDR_ADDRESS		MISSING
 
+#define QCA9887_1_0_I2C_SDA_GPIO_PIN		5
+#define QCA9887_1_0_I2C_SDA_PIN_CONFIG		3
+#define QCA9887_1_0_SI_CLK_GPIO_PIN		17
+#define QCA9887_1_0_SI_CLK_PIN_CONFIG		3
+#define QCA9887_1_0_GPIO_ENABLE_W1TS_LOW_ADDRESS 0x00000010
+
+#define QCA9887_EEPROM_SELECT_READ		0xa10000a0
+#define QCA9887_EEPROM_ADDR_HI_MASK		0x0000ff00
+#define QCA9887_EEPROM_ADDR_HI_LSB		8
+#define QCA9887_EEPROM_ADDR_LO_MASK		0x00ff0000
+#define QCA9887_EEPROM_ADDR_LO_LSB		16
+
+#define MBOX_RESET_CONTROL_ADDRESS		0x00000000
+#define MBOX_HOST_INT_STATUS_ADDRESS		0x00000800
+#define MBOX_HOST_INT_STATUS_ERROR_LSB		7
+#define MBOX_HOST_INT_STATUS_ERROR_MASK		0x00000080
+#define MBOX_HOST_INT_STATUS_CPU_LSB		6
+#define MBOX_HOST_INT_STATUS_CPU_MASK		0x00000040
+#define MBOX_HOST_INT_STATUS_COUNTER_LSB	4
+#define MBOX_HOST_INT_STATUS_COUNTER_MASK	0x00000010
+#define MBOX_CPU_INT_STATUS_ADDRESS		0x00000801
+#define MBOX_ERROR_INT_STATUS_ADDRESS		0x00000802
+#define MBOX_ERROR_INT_STATUS_WAKEUP_LSB	2
+#define MBOX_ERROR_INT_STATUS_WAKEUP_MASK	0x00000004
+#define MBOX_ERROR_INT_STATUS_RX_UNDERFLOW_LSB	1
+#define MBOX_ERROR_INT_STATUS_RX_UNDERFLOW_MASK	0x00000002
+#define MBOX_ERROR_INT_STATUS_TX_OVERFLOW_LSB	0
+#define MBOX_ERROR_INT_STATUS_TX_OVERFLOW_MASK	0x00000001
+#define MBOX_COUNTER_INT_STATUS_ADDRESS		0x00000803
+#define MBOX_COUNTER_INT_STATUS_COUNTER_LSB	0
+#define MBOX_COUNTER_INT_STATUS_COUNTER_MASK	0x000000ff
+#define MBOX_RX_LOOKAHEAD_VALID_ADDRESS		0x00000805
+#define MBOX_INT_STATUS_ENABLE_ADDRESS		0x00000828
+#define MBOX_INT_STATUS_ENABLE_ERROR_LSB	7
+#define MBOX_INT_STATUS_ENABLE_ERROR_MASK	0x00000080
+#define MBOX_INT_STATUS_ENABLE_CPU_LSB		6
+#define MBOX_INT_STATUS_ENABLE_CPU_MASK		0x00000040
+#define MBOX_INT_STATUS_ENABLE_INT_LSB		5
+#define MBOX_INT_STATUS_ENABLE_INT_MASK		0x00000020
+#define MBOX_INT_STATUS_ENABLE_COUNTER_LSB	4
+#define MBOX_INT_STATUS_ENABLE_COUNTER_MASK	0x00000010
+#define MBOX_INT_STATUS_ENABLE_MBOX_DATA_LSB	0
+#define MBOX_INT_STATUS_ENABLE_MBOX_DATA_MASK	0x0000000f
+#define MBOX_CPU_INT_STATUS_ENABLE_ADDRESS	0x00000819
+#define MBOX_CPU_INT_STATUS_ENABLE_BIT_LSB	0
+#define MBOX_CPU_INT_STATUS_ENABLE_BIT_MASK	0x000000ff
+#define MBOX_ERROR_STATUS_ENABLE_ADDRESS	0x0000081a
+#define MBOX_ERROR_STATUS_ENABLE_RX_UNDERFLOW_LSB  1
+#define MBOX_ERROR_STATUS_ENABLE_RX_UNDERFLOW_MASK 0x00000002
+#define MBOX_ERROR_STATUS_ENABLE_TX_OVERFLOW_LSB   0
+#define MBOX_ERROR_STATUS_ENABLE_TX_OVERFLOW_MASK  0x00000001
+#define MBOX_COUNTER_INT_STATUS_ENABLE_ADDRESS	0x0000081b
+#define MBOX_COUNTER_INT_STATUS_ENABLE_BIT_LSB	0
+#define MBOX_COUNTER_INT_STATUS_ENABLE_BIT_MASK	0x000000ff
+#define MBOX_COUNT_ADDRESS			0x00000820
+#define MBOX_COUNT_DEC_ADDRESS			0x00000840
+#define MBOX_WINDOW_DATA_ADDRESS		0x00000874
+#define MBOX_WINDOW_WRITE_ADDR_ADDRESS		0x00000878
+#define MBOX_WINDOW_READ_ADDR_ADDRESS		0x0000087c
+#define MBOX_CPU_DBG_SEL_ADDRESS		0x00000883
+#define MBOX_CPU_DBG_ADDRESS			0x00000884
+#define MBOX_RTC_BASE_ADDRESS			0x00000000
+#define MBOX_GPIO_BASE_ADDRESS			0x00005000
+#define MBOX_MBOX_BASE_ADDRESS			0x00008000
+
+/* PLL switch related defines */
+#define EFUSE_OFFSET				0x0000032c
+#define EFUSE_XTAL_SEL_LSB			8
+#define EFUSE_XTAL_SEL_MASK			0x00000700
+#define BB_PLL_CONFIG_OFFSET			0x000002f4
+#define BB_PLL_CONFIG_OUTDIV_LSB		18
+#define BB_PLL_CONFIG_OUTDIV_MASK		0x001c0000
+#define BB_PLL_CONFIG_FRAC_LSB			0
+#define BB_PLL_CONFIG_FRAC_MASK			0x0003ffff
+#define WLAN_PLL_SETTLE_TIME_LSB		0
+#define WLAN_PLL_SETTLE_TIME_MASK		0x000007ff
+#define WLAN_PLL_SETTLE_OFFSET			0x0018
+#define WLAN_PLL_CONTROL_NOPWD_LSB		18
+#define WLAN_PLL_CONTROL_NOPWD_MASK		0x00040000
+#define WLAN_PLL_CONTROL_BYPASS_LSB		16
+#define WLAN_PLL_CONTROL_BYPASS_MASK		0x00010000
+#define WLAN_PLL_CONTROL_CLK_SEL_LSB		14
+#define WLAN_PLL_CONTROL_CLK_SEL_MASK		0x0000c000
+#define WLAN_PLL_CONTROL_REFDIV_LSB		10
+#define WLAN_PLL_CONTROL_REFDIV_MASK		0x00003c00
+#define WLAN_PLL_CONTROL_DIV_LSB		0
+#define WLAN_PLL_CONTROL_DIV_MASK		0x000003ff
+#define WLAN_PLL_CONTROL_OFFSET			0x0014
+#define WLAN_PLL_CONTROL_SW_MASK		0x001fffff
+#define WLAN_PLL_CONTROL_RSTMASK		0xffffffff
+#define SOC_CORE_CLK_CTRL_OFFSET		0x00000114
+#define SOC_CORE_CLK_CTRL_DIV_LSB		0
+#define SOC_CORE_CLK_CTRL_DIV_MASK		0x00000007
+#define RTC_SYNC_STATUS_PLL_CHANGING_LSB	5
+#define RTC_SYNC_STATUS_PLL_CHANGING_MASK	0x00000020
+#define RTC_SYNC_STATUS_OFFSET			0x0244
+#define SOC_CPU_CLOCK_OFFSET			0x00000020
+#define BB_PLL_CONFIG_OFFSET			0x000002f4
+
+#define QCA6174_HW_1_1_CORE_CLK_DIV_ADDR	0x00403fa8
+#define QCA6174_HW_1_1_CPU_PLL_INIT_DONE_ADDR	0x00403fd0
+#define QCA6174_HW_1_1_CPU_SPEED_ADDR		0x00403fa4
+#define QCA6174_HW_1_3_CORE_CLK_DIV_ADDR	0x00403fd8
+#define QCA6174_HW_1_3_CPU_PLL_INIT_DONE_ADDR	0x00403fd0
+#define QCA6174_HW_1_3_CPU_SPEED_ADDR		0x00403fd4
+#define QCA9377_CORE_CLK_DIV_ADDR		0x00404028
+#define QCA9377_CPU_PLL_INIT_DONE_ADDR		0x00404020
+#define QCA9377_CPU_SPEED_ADDR			0x00404024
+
+#define RTC_SOC_BASE_ADDRESS_SDIO		0x00000800
+#define RTC_WMAC_BASE_ADDRESS_SDIO		0x00001000
+
+#define TARGET_CPU_FREQ				176000000
+
 #define RTC_STATE_V_GET(x) (((x) & RTC_STATE_V_MASK) >> RTC_STATE_V_LSB)
+
+#define EFUSE_XTAL_SEL_GET(x)			MS(x, EFUSE_XTAL_SEL)
+#define EFUSE_XTAL_SEL_SET(x)			SM(x, EFUSE_XTAL_SEL)
+#define BB_PLL_CONFIG_OUTDIV_GET(x)		MS(x, BB_PLL_CONFIG_OUTDIV)
+#define BB_PLL_CONFIG_OUTDIV_SET(x)		SM(x, BB_PLL_CONFIG_OUTDIV)
+#define BB_PLL_CONFIG_FRAC_GET(x)		MS(x, BB_PLL_CONFIG_FRAC)
+#define BB_PLL_CONFIG_FRAC_SET(x)		SM(x, BB_PLL_CONFIG_FRAC)
+#define WLAN_PLL_SETTLE_TIME_GET(x)		MS(x, WLAN_PLL_SETTLE_TIME)
+#define WLAN_PLL_SETTLE_TIME_SET(x)		SM(x, WLAN_PLL_SETTLE_TIME)
+#define WLAN_PLL_CONTROL_NOPWD_GET(x)		MS(x, WLAN_PLL_CONTROL_NOPWD)
+#define WLAN_PLL_CONTROL_NOPWD_SET(x)		SM(x, WLAN_PLL_CONTROL_NOPWD)
+#define WLAN_PLL_CONTROL_BYPASS_GET(x)		MS(x, WLAN_PLL_CONTROL_BYPASS)
+#define WLAN_PLL_CONTROL_BYPASS_SET(x)		SM(x, WLAN_PLL_CONTROL_BYPASS)
+#define WLAN_PLL_CONTROL_CLK_SEL_GET(x)		MS(x, WLAN_PLL_CONTROL_CLK_SEL)
+#define WLAN_PLL_CONTROL_CLK_SEL_SET(x)		SM(x, WLAN_PLL_CONTROL_CLK_SEL)
+#define WLAN_PLL_CONTROL_REFDIV_GET(x)		MS(x, WLAN_PLL_CONTROL_REFDIV)
+#define WLAN_PLL_CONTROL_REFDIV_SET(x)		SM(x, WLAN_PLL_CONTROL_REFDIV)
+#define WLAN_PLL_CONTROL_DIV_GET(x)		MS(x, WLAN_PLL_CONTROL_DIV)
+#define WLAN_PLL_CONTROL_DIV_SET(x)		SM(x, WLAN_PLL_CONTROL_DIV)
+#define SOC_CORE_CLK_CTRL_DIV_GET(x)		MS(x, SOC_CORE_CLK_CTRL_DIV)
+#define SOC_CORE_CLK_CTRL_DIV_SET(x)		SM(x, SOC_CORE_CLK_CTRL_DIV)
+#define RTC_SYNC_STATUS_PLL_CHANGING_GET(x)	MS(x, RTC_SYNC_STATUS_PLL_CHANGING)
+#define RTC_SYNC_STATUS_PLL_CHANGING_SET(x)	SM(x, RTC_SYNC_STATUS_PLL_CHANGING)
+#define SOC_CPU_CLOCK_STANDARD_GET(x)		MS(x, SOC_CPU_CLOCK_STANDARD)
+#define SOC_CPU_CLOCK_STANDARD_SET(x)		SM(x, SOC_CPU_CLOCK_STANDARD)
+
+/* Register definitions for first generation ath10k cards. These cards include
+ * a mac thich has a register allocation similar to ath9k and at least some
+ * registers including the ones relevant for modifying the coverage class are
+ * identical to the ath9k definitions.
+ * These registers are usually managed by the ath10k firmware. However by
+ * overriding them it is possible to support coverage class modifications.
+ */
+#define WAVE1_PCU_ACK_CTS_TIMEOUT		0x8014
+#define WAVE1_PCU_ACK_CTS_TIMEOUT_MAX		0x00003FFF
+#define WAVE1_PCU_ACK_CTS_TIMEOUT_ACK_MASK	0x00003FFF
+#define WAVE1_PCU_ACK_CTS_TIMEOUT_ACK_LSB	0
+#define WAVE1_PCU_ACK_CTS_TIMEOUT_CTS_MASK	0x3FFF0000
+#define WAVE1_PCU_ACK_CTS_TIMEOUT_CTS_LSB	16
+
+#define WAVE1_PCU_GBL_IFS_SLOT			0x1070
+#define WAVE1_PCU_GBL_IFS_SLOT_MASK		0x0000FFFF
+#define WAVE1_PCU_GBL_IFS_SLOT_MAX		0x0000FFFF
+#define WAVE1_PCU_GBL_IFS_SLOT_LSB		0
+#define WAVE1_PCU_GBL_IFS_SLOT_RESV0		0xFFFF0000
+
+#define WAVE1_PHYCLK				0x801C
+#define WAVE1_PHYCLK_USEC_MASK			0x0000007F
+#define WAVE1_PHYCLK_USEC_LSB			0
 
 #endif /* _HW_H_ */

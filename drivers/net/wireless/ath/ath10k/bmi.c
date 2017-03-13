@@ -88,6 +88,76 @@ int ath10k_bmi_get_target_info(struct ath10k *ar,
 	return 0;
 }
 
+#define TARGET_VERSION_SENTINAL 0xffffffffu
+
+int ath10k_bmi_get_target_info_sdio(struct ath10k *ar,
+				    struct bmi_target_info *target_info)
+{
+	struct bmi_cmd cmd;
+	union bmi_resp resp;
+	u32 cmdlen = sizeof(cmd.id) + sizeof(cmd.get_target_info);
+	u32 resplen, tmp, ver_len;
+	int ret;
+
+	ath10k_dbg(ar, ATH10K_DBG_BMI, "bmi get target info SDIO\n");
+
+	if (ar->bmi.done_sent) {
+		ath10k_warn(ar, "BMI Get Target Info Command disallowed\n");
+		return -EBUSY;
+	}
+
+	cmd.id = __cpu_to_le32(BMI_GET_TARGET_INFO);
+
+	/* Step 1: Read 4 bytes of the target info and check if it is
+	 * the special sentinal version word or the first word in the
+	 * version response.
+	 */
+	resplen = sizeof(u32);
+	ret = ath10k_hif_exchange_bmi_msg(ar, &cmd, cmdlen, &tmp, &resplen);
+	if (ret) {
+		ath10k_warn(ar, "unable to read from device\n");
+		return ret;
+	}
+
+	/* Some SDIO boards have a special sentinal byte before the real
+	 * version response.
+	 */
+	if (tmp == TARGET_VERSION_SENTINAL) {
+		/* Step 1b: Read the version length */
+		resplen = sizeof(u32);
+		ret = ath10k_hif_exchange_bmi_msg(ar, NULL, 0, &tmp,
+						  &resplen);
+		if (ret) {
+			ath10k_warn(ar, "unable to read from device\n");
+			return ret;
+		}
+	}
+
+	ver_len = __le32_to_cpu(tmp);
+
+	/* Step 2: Check the target info length */
+	if (ver_len != sizeof(resp.get_target_info)) {
+		ath10k_warn(ar, "Unexpected target info len: %u. Expected: %zu\n",
+			    ver_len, sizeof(resp.get_target_info));
+		return -EINVAL;
+	}
+
+	/* Step 3: Read the rest of the version response */
+	resplen = sizeof(resp.get_target_info) - sizeof(u32);
+	ret = ath10k_hif_exchange_bmi_msg(ar, NULL, 0,
+					  &resp.get_target_info.version,
+					  &resplen);
+	if (ret) {
+		ath10k_warn(ar, "unable to read from device\n");
+		return ret;
+	}
+
+	target_info->version = __le32_to_cpu(resp.get_target_info.version);
+	target_info->type    = __le32_to_cpu(resp.get_target_info.type);
+
+	return 0;
+}
+
 int ath10k_bmi_read_memory(struct ath10k *ar,
 			   u32 address, void *buffer, u32 length)
 {
@@ -170,6 +240,79 @@ int ath10k_bmi_write_memory(struct ath10k *ar,
 		address += txlen;
 		buffer  += txlen;
 		length  -= txlen;
+	}
+
+	return 0;
+}
+
+int ath10k_bmi_read_soc_reg(struct ath10k *ar,
+			    u32 address, u32 *regval)
+{
+	struct bmi_cmd cmd;
+	union bmi_resp resp;
+	u32 cmdlen = sizeof(cmd.id) + sizeof(cmd.read_soc_reg);
+	u32 rxlen;
+	int ret;
+
+	ath10k_dbg(ar, ATH10K_DBG_BMI,
+		   "bmi read SOC register address 0x%x\n",
+		   address);
+
+	if (ar->bmi.done_sent) {
+		ath10k_warn(ar, "command disallowed\n");
+		return -EBUSY;
+	}
+
+	rxlen = sizeof(resp.read_soc_reg.value);
+
+	cmd.id                = __cpu_to_le32(BMI_READ_SOC_REGISTER);
+	cmd.read_soc_reg.addr = __cpu_to_le32(address);
+
+	ret = ath10k_hif_exchange_bmi_msg(ar, &cmd, cmdlen,
+					  &resp, &rxlen);
+	if (ret) {
+		ath10k_warn(ar, "unable to read from the device (%d)\n",
+			    ret);
+		return ret;
+	}
+
+	if (rxlen != sizeof(resp.read_soc_reg.value)) {
+		ath10k_warn(ar, "Unexpected read len: %u (expected %zu)\n",
+			    rxlen, sizeof(resp.read_soc_reg.value));
+		return ret;
+	}
+
+	*regval = __le32_to_cpu(resp.read_soc_reg.value);
+
+	return 0;
+}
+
+int ath10k_bmi_write_soc_reg(struct ath10k *ar,
+			     u32 address, u32 regval)
+{
+	struct bmi_cmd cmd;
+	u32 cmdlen = sizeof(cmd.id) + sizeof(cmd.write_soc_reg);
+	int ret;
+
+	ath10k_dbg(ar, ATH10K_DBG_BMI,
+		   "bmi write SOC register address 0x%x\n",
+		   address);
+
+	if (ar->bmi.done_sent) {
+		ath10k_warn(ar, "command disallowed\n");
+		return -EBUSY;
+	}
+
+	cmd.id                  = __cpu_to_le32(BMI_WRITE_SOC_REGISTER);
+	cmd.write_soc_reg.addr  = __cpu_to_le32(address);
+	cmd.write_soc_reg.value = __cpu_to_le32(regval);
+
+	ret = ath10k_hif_exchange_bmi_msg(ar, &cmd, cmdlen,
+					  NULL, NULL);
+	if (ret) {
+		ath10k_warn(ar, "unable to write to the device (%d)\n",
+			    ret);
+		return ret;
 	}
 
 	return 0;
