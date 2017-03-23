@@ -151,12 +151,9 @@ void crypto_remove_spawns(struct crypto_alg *alg, struct list_head *list,
 
 	spawns = &top;
 	do {
-		while (!list_empty(spawns)) {
-			struct crypto_instance *inst;
-
-			spawn = list_first_entry(spawns, struct crypto_spawn,
-						 list);
-			inst = spawn->inst;
+		while ((spawn = list_first_entry_or_null(spawns,
+						struct crypto_spawn, list))) {
+			struct crypto_instance *inst = spawn->inst;
 
 			BUG_ON(&inst->alg == alg);
 
